@@ -1,0 +1,25 @@
+# =====================
+# Secrets (DO NOT COMMIT)
+# =====================
+.env
+service-account.json
+
+# Any key-style JSON
+*.key.json
+
+# =====================
+# Python
+# =====================
+__pycache__/
+*.pyc
+venv/
+
+# =====================
+# Editor / OS
+# =====================
+.vscode/
+.DS_Store
+
+# Node
+node_modules/
+frontend/node_modules/
