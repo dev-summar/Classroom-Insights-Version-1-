@@ -106,17 +106,17 @@ const Dashboard = () => {
     ];
 
     return (
-        <div className="fade-in">
-            <div className="header-section">
+        <div className="fade-in dashboard-page">
+            <div className="header-section dashboard-header-section">
                 <div>
-                    <h1 className="page-title">Institutional Overview</h1>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', marginTop: '4px' }}>
+                    <h1 className="page-title dashboard-page-title">Institutional Overview</h1>
+                    <p className="dashboard-subtitle">
                         Real-time analytics for MIET Google Classroom ecosystem
                     </p>
                 </div>
-                <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+                <div className="dashboard-sync-row">
                     {syncStatus === 'success' && (
-                        <div style={{ color: 'var(--success)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem', fontWeight: 600 }}>
+                        <div className="dashboard-sync-success">
                             <CheckCircle2 size={18} /> Sync Complete
                         </div>
                     )}
@@ -132,28 +132,15 @@ const Dashboard = () => {
             </div>
 
             {error && (
-                <div className="card" style={{
-                    background: '#fef2f2',
-                    border: '1px solid #fee2e2',
-                    marginBottom: '2rem',
-                    color: '#991b1b',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '12px'
-                }}>
+                <div className="dashboard-error-banner">
                     <AlertCircle size={20} />
                     {error}
                 </div>
             )}
 
-            <div style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(4, 1fr)',
-                gap: '20px',
-                marginBottom: '2.5rem'
-            }}>
+            <div className="dashboard-cards-grid">
                 {cardData.map((card) => (
-                    <Link to={card.path} key={card.label} className="card stat-card" style={{ textDecoration: 'none' }}>
+                    <Link to={card.path} key={card.label} className="card stat-card dashboard-stat-card">
                         <div className="stat-icon" style={{ background: `${card.color}10`, color: card.color }}>
                             <card.icon size={24} />
                         </div>
@@ -161,48 +148,31 @@ const Dashboard = () => {
                             <span className="stat-label">{card.label}</span>
                             <div className="stat-number">{card.value?.toLocaleString() || 0}</div>
                         </div>
-                        <div style={{
-                            marginTop: 'auto',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '4px',
-                            fontSize: '0.75rem',
-                            fontWeight: 600,
-                            color: card.color
-                        }}>
+                        <span className="view-details-link" style={{ color: card.color }}>
                             View Details <ArrowRight size={12} />
-                        </div>
+                        </span>
                     </Link>
                 ))}
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '24px' }}>
+            <div className="dashboard-bottom-grid">
                 <div className="card">
-                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <TrendingUp size={20} color="var(--miet-blue)" />
+                    <h2 className="dashboard-section-title">
+                        <TrendingUp size={20} className="dashboard-section-title-icon" />
                         Engagement Analytics
                     </h2>
                     <AnalyticsDashboard stats={stats} extraStats={extraStats} />
                 </div>
 
                 <div className="card">
-                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '1.5rem' }}>System Status</h2>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    <h2 className="dashboard-section-title">System Status</h2>
+                    <div className="dashboard-status-list">
                         <StatusItem label="Classroom API" status="Connected" />
                         <StatusItem label="Institutional DB" status="Stable" />
                         <StatusItem label="Sync Pipeline" status="Active" />
-
-                        <div style={{
-                            marginTop: '1rem',
-                            padding: '1rem',
-                            background: 'var(--primary-light)',
-                            borderRadius: '8px',
-                            fontSize: '0.85rem',
-                            color: 'var(--primary)',
-                            fontWeight: 500
-                        }}>
-                            All systems are functioning within normal institutional parameters.
-                        </div>
+                    </div>
+                    <div className="dashboard-status-message">
+                        All systems are functioning within normal institutional parameters.
                     </div>
                 </div>
             </div>
@@ -211,8 +181,8 @@ const Dashboard = () => {
 };
 
 const StatusItem = ({ label, status }) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)', fontWeight: 500 }}>{label}</span>
+    <div className="dashboard-status-item">
+        <span className="dashboard-status-item-label">{label}</span>
         <span className="badge badge-active">{status}</span>
     </div>
 );

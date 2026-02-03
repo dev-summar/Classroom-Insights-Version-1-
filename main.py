@@ -2,6 +2,8 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import os
 import logging
+import asyncio
+import time
 from pathlib import Path
 
 # 1️⃣ Load environment variables from the SAME directory as this file
@@ -21,6 +23,9 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# Suppress noisy MongoDB/driver INFO logs; keep WARNING and ERROR
+for _name in ("pymongo", "motor", "urllib3"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 logger = logging.getLogger("classroom-backend")
 
 # 2️⃣ Read MongoDB URI strictly
@@ -58,7 +63,7 @@ if "localhost" in MONGODB_URI or "127.0.0.1" in MONGODB_URI:
 if "mongodb.net" not in MONGODB_URI:
     logger.warning("⚠️ MONGODB_URI does not appear to be an Atlas cluster (missing 'mongodb.net')")
 
-print("✅ MongoDB Atlas validation passed, connecting...")
+print(" MongoDB Atlas validation passed, connecting...")
 
 try:
     # 5️⃣ Initialize Mongo
@@ -71,17 +76,18 @@ try:
     db_info = db_client.nodes
     hostname = list(db_info)[0][0] if db_info else "unknown"
     
-    logger.info("🚀 Connected to MongoDB Atlas")
+    logger.info(" Connected to MongoDB Atlas")
     logger.info(f"Connected to Cluster: {hostname}")
     
-    print(f"✅ Connected to MongoDB Atlas: {hostname}")
+    print(f" Connected to MongoDB Atlas: {hostname}")
 
 except Exception as e:
-    logger.error(f"❌ Failed to connect to MongoDB: {str(e)}")
+    logger.error(f" Failed to connect to MongoDB: {str(e)}")
     # Crash the app if we can't connect to Atlas
     raise RuntimeError(f"Database Connection Critical Failure: {str(e)}")
 
-# Ensure indexes for performance and deduplication
+# --- MongoDB indexes: deduplication + query performance (no schema change) ---
+# Core unique / filter indexes
 db.courses.create_index([("id", 1)], unique=True)
 db.courses.create_index([("courseState", 1)])
 db.teachers.create_index([("userId", 1)])
@@ -93,6 +99,53 @@ db.coursework.create_index([("courseId", 1)])
 db.submissions.create_index([("id", 1)], unique=True)
 db.submissions.create_index([("courseId", 1)])
 db.submissions.create_index([("courseWorkId", 1)])
+# Compound indexes for list/search and analytics (match filter + sort)
+db.courses.create_index([("courseState", 1), ("name", 1)])  # GET /api/courses with search
+db.coursework.create_index([("courseId", 1), ("creationTime", 1)])  # analytics sort
+db.students.create_index([("courseId", 1), ("name", 1)])  # students list search
+db.teachers.create_index([("courseId", 1), ("name", 1)])  # teachers list search
+db.submissions.create_index([("courseId", 1), ("userId", 1)])  # analytics grouping
+
+# --- In-memory read-through cache (TTL, sync-aware invalidation) ---
+_CACHE: dict[str, tuple[float, object]] = {}
+_CACHE_TTL_SECONDS = 60
+
+def _cache_get(key: str):
+    """Get from cache if present and not expired. Thread-safe for single process."""
+    if key not in _CACHE:
+        return None
+    expires_at, value = _CACHE[key]
+    if time.monotonic() > expires_at:
+        del _CACHE[key]
+        return None
+    return value
+
+def _cache_set(key: str, value: object, ttl_seconds: int = _CACHE_TTL_SECONDS):
+    _CACHE[key] = (time.monotonic() + ttl_seconds, value)
+
+def _cache_invalidate_prefix(prefix: str):
+    """Remove all keys starting with prefix. Call after sync to keep data fresh."""
+    to_del = [k for k in _CACHE if k.startswith(prefix)]
+    for k in to_del:
+        del _CACHE[k]
+    if to_del:
+        logger.info(f"Cache invalidated {len(to_del)} keys with prefix '{prefix}'")
+
+async def _run_sync(fn, *args, **kwargs):
+    """Run a sync (blocking) DB call in a thread so we can parallelize with asyncio."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+async def _get_active_course_ids():
+    """Active course IDs used by list endpoints. Cached to avoid repeated find()."""
+    cache_key = "active_course_ids"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    result = await _run_sync(
+        lambda: [c["id"] for c in db.courses.find({"courseState": "ACTIVE"}, {"id": 1})]
+    )
+    _cache_set(cache_key, result, 120)
+    return result
 
 app = FastAPI(title="MIET Classroom Analytics")
 
@@ -369,6 +422,11 @@ async def sync_courses():
         logger.info(f"SYNC[STUDENTS] Total students upserted: {synced_students_count}")
         logger.info(f"DB[students] total documents after upsert: {db.students.count_documents({})}")
 
+        # Sync-aware cache invalidation: only keys affected by course/roster sync
+        _cache_invalidate_prefix("stats")
+        _cache_invalidate_prefix("active_course_ids")
+        _cache_invalidate_prefix("analytics")  # roster changes affect silent/at-risk
+
         return {
             "status": "success",
             "summary": {
@@ -449,6 +507,10 @@ async def sync_coursework():
         logger.info(f"DB[coursework] total documents after upsert: {db.coursework.count_documents({})}")
         logger.info(f"DB[submissions] total documents after upsert: {db.submissions.count_documents({})}")
 
+        # Sync-aware cache invalidation: stats and analytics depend on coursework/submissions
+        _cache_invalidate_prefix("stats")
+        _cache_invalidate_prefix("analytics")
+
         return {
             "status": "success",
             "summary": {
@@ -479,23 +541,47 @@ async def sync_all():
 
 @app.get("/api/stats")
 async def get_stats():
-    """Fetches stats directly from DB with unique person counts for students and teachers."""
-    # Get IDs of active courses
-    active_courses = list(db.courses.find({"courseState": "ACTIVE"}, {"id": 1}))
+    """Fetches stats from DB with unique person counts. Cached 60s; parallel DB calls."""
+    cache_key = "stats"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Single query for active course IDs (projection)
+    active_courses = await _run_sync(
+        lambda: list(db.courses.find({"courseState": "ACTIVE"}, {"id": 1}))
+    )
     active_ids = [c["id"] for c in active_courses]
-    
-    # Use aggregation for robust unique counts
-    unique_students_count = len(db.students.distinct("userId", {"courseId": {"$in": active_ids}}))
-    unique_teachers_count = len(db.teachers.distinct("userId", {"courseId": {"$in": active_ids}}))
-    
+    if not active_ids:
+        stats = {"courses": 0, "students": 0, "teachers": 0, "assignments": 0, "submissions": 0}
+        _cache_set(cache_key, stats, 60)
+        return stats
+
+    # Parallelize independent count/distinct queries
+    def _distinct_students():
+        return len(db.students.distinct("userId", {"courseId": {"$in": active_ids}}))
+    def _distinct_teachers():
+        return len(db.teachers.distinct("userId", {"courseId": {"$in": active_ids}}))
+    def _count_coursework():
+        return db.coursework.count_documents({"courseId": {"$in": active_ids}})
+    def _count_submissions():
+        return db.submissions.count_documents({"courseId": {"$in": active_ids}})
+
+    unique_students_count, unique_teachers_count, assignments_count, submissions_count = await asyncio.gather(
+        _run_sync(_distinct_students),
+        _run_sync(_distinct_teachers),
+        _run_sync(_count_coursework),
+        _run_sync(_count_submissions),
+    )
+
     stats = {
         "courses": len(active_ids),
         "students": unique_students_count,
         "teachers": unique_teachers_count,
-        "assignments": db.coursework.count_documents({"courseId": {"$in": active_ids}}),
-        "submissions": db.submissions.count_documents({"courseId": {"$in": active_ids}})
+        "assignments": assignments_count,
+        "submissions": submissions_count,
     }
-    
+    _cache_set(cache_key, stats, 60)
     logger.info(f"STATS served: UniqueStudents={unique_students_count}, UniqueTeachers={unique_teachers_count}")
     return stats
 
@@ -524,63 +610,112 @@ async def get_db_source():
 
 @app.get("/api/courses")
 async def get_courses(page: int = 1, limit: int = 10, search: str = ""):
+    """List courses with counts. Avoids N+1: batch count aggregations run in parallel."""
     skip = (page - 1) * limit
     query = {"courseState": "ACTIVE"}
     if search:
         query["name"] = {"$regex": search, "$options": "i"}
-        
-    courses = list(db.courses.find(query).skip(skip).limit(limit))
-    total = db.courses.count_documents(query)
-    
-    # Enrich each course with counts from related collections
+
+    # Parallel: fetch page of courses + total count (indexed on courseState/name)
+    def _find_courses():
+        return list(db.courses.find(query).skip(skip).limit(limit))
+    def _count_courses():
+        return db.courses.count_documents(query)
+
+    courses, total = await asyncio.gather(
+        _run_sync(_find_courses),
+        _run_sync(_count_courses),
+    )
+    if not courses:
+        return {"data": [], "total": total, "page": page, "limit": limit}
+
+    course_ids = [c["id"] for c in courses]
+
+    # Batch unique-user counts per course (one aggregation per collection instead of N distinct() calls)
+    def _teacher_counts():
+        return list(db.teachers.aggregate([
+            {"$match": {"courseId": {"$in": course_ids}}},
+            {"$group": {"_id": "$courseId", "userIds": {"$addToSet": "$userId"}}},
+            {"$project": {"count": {"$size": "$userIds"}}},
+        ]))
+    def _student_counts():
+        return list(db.students.aggregate([
+            {"$match": {"courseId": {"$in": course_ids}}},
+            {"$group": {"_id": "$courseId", "userIds": {"$addToSet": "$userId"}}},
+            {"$project": {"count": {"$size": "$userIds"}}},
+        ]))
+    def _assignment_counts():
+        return list(db.coursework.aggregate([
+            {"$match": {"courseId": {"$in": course_ids}}},
+            {"$group": {"_id": "$courseId", "count": {"$sum": 1}}},
+        ]))
+
+    teacher_counts, student_counts, assignment_counts = await asyncio.gather(
+        _run_sync(_teacher_counts),
+        _run_sync(_student_counts),
+        _run_sync(_assignment_counts),
+    )
+    t_map = {x["_id"]: x["count"] for x in teacher_counts}
+    s_map = {x["_id"]: x["count"] for x in student_counts}
+    a_map = {x["_id"]: x["count"] for x in assignment_counts}  # assignment count is total docs
+
     for c in courses:
-        if "_id" in c: c["_id"] = str(c["_id"])
-        course_id = c["id"]
-        
-        # Count unique teachers for this course
-        c["teacherCount"] = len(db.teachers.distinct("userId", {"courseId": course_id}))
-        
-        # Count unique students for this course
-        c["studentCount"] = len(db.students.distinct("userId", {"courseId": course_id}))
-        
-        # Count assignments for this course
-        c["assignmentCount"] = db.coursework.count_documents({"courseId": course_id})
-    
+        if "_id" in c:
+            c["_id"] = str(c["_id"])
+        cid = c["id"]
+        c["teacherCount"] = t_map.get(cid, 0)
+        c["studentCount"] = s_map.get(cid, 0)
+        c["assignmentCount"] = a_map.get(cid, 0)
+
     return {"data": courses, "total": total, "page": page, "limit": limit}
 
 @app.get("/api/courses/{courseId}")
 async def get_course_detail(courseId: str):
-    course = db.courses.find_one({"id": courseId, "courseState": "ACTIVE"})
-    if not course: 
+    """Course detail with teachers, students, assignments. All four DB reads in parallel."""
+    def _course():
+        return db.courses.find_one({"id": courseId, "courseState": "ACTIVE"})
+    def _teachers():
+        return list(db.teachers.find({"courseId": courseId}))
+    def _students():
+        return list(db.students.find({"courseId": courseId}))
+    def _assignments():
+        return list(db.coursework.find({"courseId": courseId}))
+
+    course, teachers, students, assignments = await asyncio.gather(
+        _run_sync(_course),
+        _run_sync(_teachers),
+        _run_sync(_students),
+        _run_sync(_assignments),
+    )
+    if not course:
         raise HTTPException(status_code=404, detail="Course not found or is archived")
-    
-    if "_id" in course: course["_id"] = str(course["_id"])
-    
-    teachers = list(db.teachers.find({"courseId": courseId}))
-    students = list(db.students.find({"courseId": courseId}))
-    assignments = list(db.coursework.find({"courseId": courseId}))
-    
+
+    if "_id" in course:
+        course["_id"] = str(course["_id"])
     for items in [teachers, students, assignments]:
         for item in items:
-            if "_id" in item: item["_id"] = str(item["_id"])
-            
+            if "_id" in item:
+                item["_id"] = str(item["_id"])
+
     return {
         "course": course,
         "teachers": teachers,
         "students": students,
-        "assignments": assignments
+        "assignments": assignments,
     }
 
 @app.get("/api/students")
 async def get_students(page: int = 1, limit: int = 10, search: str = ""):
-    """Returns a deduplicated list of students with course counts."""
-    active_ids = [c["id"] for c in db.courses.find({"courseState": "ACTIVE"}, {"id": 1})]
+    """Returns a deduplicated list of students with course counts. Uses cached active_course_ids."""
+    active_ids = await _get_active_course_ids()
+    if not active_ids:
+        return {"data": [], "total": 0, "page": page, "limit": limit}
+
     skip = (page - 1) * limit
-    
     match_query = {"courseId": {"$in": active_ids}}
     if search:
         match_query["name"] = {"$regex": search, "$options": "i"}
-        
+
     pipeline = [
         {"$match": match_query},
         {"$group": {
@@ -589,33 +724,35 @@ async def get_students(page: int = 1, limit: int = 10, search: str = ""):
             "email": {"$first": "$email"},
             "userId": {"$first": "$userId"},
             "photoUrl": {"$first": "$photoUrl"},
-            "courseCount": {"$sum": 1}
+            "courseCount": {"$sum": 1},
         }},
         {"$sort": {"name": 1}},
         {"$facet": {
             "metadata": [{"$count": "total"}],
-            "data": [{"$skip": skip}, {"$limit": limit}]
-        }}
+            "data": [{"$skip": skip}, {"$limit": limit}],
+        }},
     ]
-    
-    result = list(db.students.aggregate(pipeline))[0]
+
+    result = await _run_sync(lambda: list(db.students.aggregate(pipeline))[0])
     total = result["metadata"][0]["total"] if result["metadata"] else 0
     students = result["data"]
-    
     for s in students:
-        if "_id" in s: s["_id"] = str(s["_id"])
+        if "_id" in s:
+            s["_id"] = str(s["_id"])
     return {"data": students, "total": total, "page": page, "limit": limit}
 
 @app.get("/api/teachers")
 async def get_teachers(page: int = 1, limit: int = 10, search: str = ""):
-    """Returns a deduplicated list of teachers with course counts."""
-    active_ids = [c["id"] for c in db.courses.find({"courseState": "ACTIVE"}, {"id": 1})]
+    """Returns a deduplicated list of teachers with course counts. Uses cached active_course_ids."""
+    active_ids = await _get_active_course_ids()
+    if not active_ids:
+        return {"data": [], "total": 0, "page": page, "limit": limit}
+
     skip = (page - 1) * limit
-    
     match_query = {"courseId": {"$in": active_ids}}
     if search:
         match_query["name"] = {"$regex": search, "$options": "i"}
-        
+
     pipeline = [
         {"$match": match_query},
         {"$group": {
@@ -624,172 +761,181 @@ async def get_teachers(page: int = 1, limit: int = 10, search: str = ""):
             "email": {"$first": "$email"},
             "userId": {"$first": "$userId"},
             "photoUrl": {"$first": "$photoUrl"},
-            "courseCount": {"$sum": 1}
+            "courseCount": {"$sum": 1},
         }},
         {"$sort": {"name": 1}},
         {"$facet": {
             "metadata": [{"$count": "total"}],
-            "data": [{"$skip": skip}, {"$limit": limit}]
-        }}
+            "data": [{"$skip": skip}, {"$limit": limit}],
+        }},
     ]
-    
-    result = list(db.teachers.aggregate(pipeline))[0]
+
+    result = await _run_sync(lambda: list(db.teachers.aggregate(pipeline))[0])
     total = result["metadata"][0]["total"] if result["metadata"] else 0
     teachers = result["data"]
-    
     for t in teachers:
-        if "_id" in t: t["_id"] = str(t["_id"])
+        if "_id" in t:
+            t["_id"] = str(t["_id"])
     return {"data": teachers, "total": total, "page": page, "limit": limit}
 
 @app.get("/api/assignments")
 async def get_assignments(page: int = 1, limit: int = 10, search: str = ""):
-    """Returns assignments with course names via MongoDB aggregation."""
-    active_ids = [c["id"] for c in db.courses.find({"courseState": "ACTIVE"}, {"id": 1})]
+    """Returns assignments with course names via aggregation. Uses cached active_course_ids."""
+    active_ids = await _get_active_course_ids()
+    if not active_ids:
+        return {"data": [], "total": 0, "page": page, "limit": limit}
+
     skip = (page - 1) * limit
-    
     match_query = {"courseId": {"$in": active_ids}}
     if search:
         match_query["title"] = {"$regex": search, "$options": "i"}
-    
+
     pipeline = [
         {"$match": match_query},
         {"$lookup": {
             "from": "courses",
             "localField": "courseId",
             "foreignField": "id",
-            "as": "course"
+            "as": "course",
         }},
-        {"$addFields": {
-            "courseName": {"$arrayElemAt": ["$course.name", 0]}
-        }},
-        {"$project": {
-            "course": 0  # Remove the joined array, keep only courseName
-        }},
+        {"$addFields": {"courseName": {"$arrayElemAt": ["$course.name", 0]}}},
+        {"$project": {"course": 0}},
         {"$facet": {
             "metadata": [{"$count": "total"}],
-            "data": [{"$skip": skip}, {"$limit": limit}]
-        }}
+            "data": [{"$skip": skip}, {"$limit": limit}],
+        }},
     ]
-    
-    result = list(db.coursework.aggregate(pipeline))[0]
+
+    result = await _run_sync(lambda: list(db.coursework.aggregate(pipeline))[0])
     total = result["metadata"][0]["total"] if result["metadata"] else 0
     assignments = result["data"]
-    
     for a in assignments:
-        if "_id" in a: a["_id"] = str(a["_id"])
-        # Fallback if course not found
+        if "_id" in a:
+            a["_id"] = str(a["_id"])
         if not a.get("courseName"):
             a["courseName"] = "Unknown Course"
-    
     return {"data": assignments, "total": total, "page": page, "limit": limit}
 
 @app.get("/api/assignments/{id}")
 async def get_assignment_detail(id: str, page: int = 1, limit: int = 10):
-    """Returns assignment details with course name and submissions with student names."""
-    assignment = db.coursework.find_one({"id": id})
-    if not assignment: 
+    """Assignment detail with course name and submissions. Course + submissions run in parallel after assignment."""
+    assignment = await _run_sync(lambda: db.coursework.find_one({"id": id}))
+    if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
-        
-    # Check if parent course is active
-    parent_course = db.courses.find_one({"id": assignment["courseId"], "courseState": "ACTIVE"})
-    if not parent_course:
-        raise HTTPException(status_code=404, detail="Assignment belongs to an archived course")
 
-    if "_id" in assignment: assignment["_id"] = str(assignment["_id"])
-    
-    # Add course name to assignment
-    assignment["courseName"] = parent_course.get("name", "Unknown Course")
-    
-    # Fetch submissions with student names using aggregation
+    course_id = assignment["courseId"]
+    def _parent_course():
+        return db.courses.find_one({"id": course_id, "courseState": "ACTIVE"})
     skip = (page - 1) * limit
-    
     submissions_pipeline = [
         {"$match": {"courseWorkId": id}},
         {"$lookup": {
             "from": "students",
             "localField": "userId",
             "foreignField": "userId",
-            "as": "student"
+            "as": "student",
         }},
         {"$addFields": {
             "studentName": {
                 "$ifNull": [
                     {"$arrayElemAt": ["$student.name", 0]},
-                    "Unknown Student"
+                    "Unknown Student",
                 ]
-            }
+            },
         }},
-        {"$project": {
-            "student": 0  # Remove the joined array
-        }},
+        {"$project": {"student": 0}},
         {"$facet": {
             "metadata": [{"$count": "total"}],
-            "data": [{"$skip": skip}, {"$limit": limit}]
-        }}
+            "data": [{"$skip": skip}, {"$limit": limit}],
+        }},
     ]
-    
-    submissions_result = list(db.submissions.aggregate(submissions_pipeline))[0]
+    def _submissions():
+        return list(db.submissions.aggregate(submissions_pipeline))[0]
+
+    parent_course, submissions_result = await asyncio.gather(
+        _run_sync(_parent_course),
+        _run_sync(_submissions),
+    )
+    if not parent_course:
+        raise HTTPException(status_code=404, detail="Assignment belongs to an archived course")
+
+    if "_id" in assignment:
+        assignment["_id"] = str(assignment["_id"])
+    assignment["courseName"] = parent_course.get("name", "Unknown Course")
     total = submissions_result["metadata"][0]["total"] if submissions_result["metadata"] else 0
     submissions = submissions_result["data"]
-    
     for s in submissions:
-        if "_id" in s: s["_id"] = str(s["_id"])
-        
+        if "_id" in s:
+            s["_id"] = str(s["_id"])
+
     return {
         "assignment": assignment,
-        "submissions": {"data": submissions, "total": total, "page": page, "limit": limit}
+        "submissions": {"data": submissions, "total": total, "page": page, "limit": limit},
     }
 
 # --- Analytics Endpoints ---
 
 async def calculate_student_analytics():
-    """Shared logic for compute student analytics across the institution."""
-    # 1. Active Courses
-    active_courses = list(db.courses.find({"courseState": "ACTIVE"}, {"id": 1}))
+    """Shared logic for student analytics. Cached 90s; DB fetches parallelized after active_ids."""
+    cache_key = "analytics:student_analytics"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    active_courses = await _run_sync(
+        lambda: list(db.courses.find({"courseState": "ACTIVE"}, {"id": 1}))
+    )
     active_ids = [c["id"] for c in active_courses]
     if not active_ids:
         return []
 
-    # 2. Coursework map to avoid multiple queries
-    # Pull only necessary fields: id, courseId, creationTime
-    all_cw = list(db.coursework.find(
-        {"courseId": {"$in": active_ids}}, 
-        {"id": 1, "courseId": 1, "creationTime": 1}
-    ).sort("creationTime", 1))
-    
+    # Parallel: coursework (projection), students agg, submissions agg
+    def _coursework():
+        return list(db.coursework.find(
+            {"courseId": {"$in": active_ids}},
+            {"id": 1, "courseId": 1, "creationTime": 1},
+        ).sort("creationTime", 1))
+
+    def _students_agg():
+        pipeline = [
+            {"$match": {"courseId": {"$in": active_ids}}},
+            {"$group": {
+                "_id": "$userId",
+                "userId": {"$first": "$userId"},
+                "studentName": {"$first": "$name"},
+                "courseIds": {"$push": "$courseId"},
+            }},
+        ]
+        return list(db.students.aggregate(pipeline))
+
+    def _subs_agg():
+        pipeline = [
+            {"$match": {"courseId": {"$in": active_ids}}},
+            {"$group": {
+                "_id": "$userId",
+                "subs": {"$push": {
+                    "courseWorkId": "$courseWorkId",
+                    "state": "$state",
+                    "lastUpdated": "$updateTime",
+                }},
+            }},
+        ]
+        return list(db.submissions.aggregate(pipeline))
+
+    all_cw, unique_students, sub_results = await asyncio.gather(
+        _run_sync(_coursework),
+        _run_sync(_students_agg),
+        _run_sync(_subs_agg),
+    )
+
     course_cw_map = {}
     for cw in all_cw:
-        cid = cw['courseId']
+        cid = cw["courseId"]
         if cid not in course_cw_map:
             course_cw_map[cid] = []
         course_cw_map[cid].append(cw)
 
-    # 3. Unique Students and their enrolled courses
-    students_pipeline = [
-        {"$match": {"courseId": {"$in": active_ids}}},
-        {"$group": {
-            "_id": "$userId",
-            "userId": {"$first": "$userId"},
-            "studentName": {"$first": "$name"},
-            "courseIds": {"$push": "$courseId"}
-        }}
-    ]
-    unique_students = list(db.students.aggregate(students_pipeline))
-
-    # 4. Submissions for these students
-    # Group submissions by userId
-    sub_pipeline = [
-        {"$match": {"courseId": {"$in": active_ids}}},
-        {"$group": {
-            "_id": "$userId",
-            "subs": {"$push": {
-                "courseWorkId": "$courseWorkId",
-                "state": "$state",
-                "lastUpdated": "$updateTime"
-            }}
-        }}
-    ]
-    user_subs = {s["_id"]: s["subs"] for s in db.submissions.aggregate(sub_pipeline)}
+    user_subs = {s["_id"]: s["subs"] for s in sub_results}
 
     results = []
     now = datetime.utcnow()
@@ -867,9 +1013,10 @@ async def calculate_student_analytics():
             "missed": missing,
             "missedPercentage": int(missed_pct),
             "isSilent": is_silent,
-            "isAtRisk": is_at_risk
+            "isAtRisk": is_at_risk,
         })
-    
+
+    _cache_set(cache_key, results, 90)
     return results
 
 @app.get("/analytics/silent-students")

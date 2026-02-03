@@ -1,116 +1,156 @@
-# Production Deployment Guide - Miet Classroom Insights
+# Production Deployment Guide
 
-This document outlines the steps required to deploy the Miet Classroom Insights application in a production environment manually.
+This document describes the **MIET Classroom Insights** system for production handoff. It covers architecture, configuration, and deployment only. No application logic, APIs, or UI are modified by this guide.
 
-## 1. System Prerequisites
+---
 
-Ensure the production server meets the following requirements:
+## 1. System Architecture
 
-- **Operating System**: Linux (Ubuntu 20.04/22.04 LTS recommended) or Windows Server.
-- **Runtime Environments**:
-  - **Python**: Version 3.9 or higher.
-  - **Node.js**: Version 18 or higher (required for building the frontend).
-- **Database**: MongoDB (Atlas Cluster or self-hosted instance).
-- **External Services**: Google Cloud Platform Project (enabled for Google Auth and APIs).
+- **Frontend**: React SPA (Vite), served as static files from a web server or CDN.
+- **Backend**: FastAPI (Python) API server; handles Google Classroom sync, analytics, and data access.
+- **Database**: MongoDB Atlas (cloud); all persistent data lives here. Local MongoDB is **not** supported.
 
-## 2. Environment Configuration
+Data flow: Frontend → Backend (REST API) → MongoDB Atlas. Google Classroom data is synced into the database via the backend using a Google service account; the frontend never talks to Google directly.
 
-Create a `.env` file in the project root directory. **Do not commit this file to version control.**
+---
 
-```ini
-# --- Database Configuration ---
-# Connection string for MongoDB
-MONGODB_URI=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
-DB_NAME=miet_classroom_insights
+## 2. Backend Stack
 
-# --- Google Cloud Configuration ---
-# Path to the service account JSON file (if using server-to-server auth)
-GOOGLE_APPLICATION_CREDENTIALS=certs/service-account.json
-# OAuth 2.0 Client ID and Secret
-GOOGLE_CLIENT_ID=your-google-client-id
-GOOGLE_CLIENT_SECRET=your-google-client-secret
+- **Runtime**: Python, FastAPI
+- **Database**: MongoDB Atlas
+- **Sync**: Google Classroom API (service account); incremental upserts into MongoDB
 
-# --- Application Security ---
-# Secret key for signing session cookies or JWTs
-SECRET_KEY=change-this-to-a-secure-random-string
-# Allowed Frontend Origin (CORS)
-FRONTEND_URL=https://your-production-domain.com
+### 2.1 Incremental Sync Behavior
+
+- Sync **adds or updates** records; it does **not** wipe existing data.
+- Courses, teachers, students, coursework, and submissions are **upserted** by stable IDs.
+- Existing data in the DB stays; new or changed data from Google Classroom is merged in.
+
+### 2.2 Background Sync (Non-Blocking)
+
+- Sync is triggered via API (`POST /api/sync/all` or per-resource sync endpoints).
+- The UI remains visible and responsive during sync; users can keep browsing cached/current data.
+- After sync completes, cache is invalidated so subsequent requests see updated data.
+
+---
+
+## 3. Backend: Environment & Run
+
+### 3.1 Required Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `MONGODB_URI` | Full MongoDB Atlas connection string (e.g. `mongodb+srv://user:pass@cluster.mongodb.net/`). **Required.** Localhost/127.0.0.1 is rejected. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to the Google Cloud service account JSON file (e.g. `./service-account.json`). Used for Google Classroom API. |
+| `GOOGLE_IMPERSONATED_USER` | Email of the Google Workspace user (domain admin or delegated) to impersonate for Classroom API access. |
+
+### 3.2 Optional Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `PORT` | HTTP port for the backend (default: `8000`). |
+| `FRONTEND_ORIGIN` | Allowed CORS origin for the frontend (default: `http://localhost:5173`). Set to production frontend URL in production. |
+| `ENV` | Optional; can be set to `production` for environment-specific tooling or checks. Not used by application logic. |
+
+### 3.3 Database Name
+
+- The application uses a **fixed database name**: `classroom_insights`. It is not configurable via environment.
+
+### 3.4 Google Classroom Service Account
+
+- Obtain a Google Cloud service account JSON key with Classroom API access and domain-wide delegation (if impersonating a user).
+- Configure the path via **`GOOGLE_APPLICATION_CREDENTIALS`** (environment or `.env`). Do **not** commit the JSON file or any secrets to the repository.
+
+### 3.5 Running the Backend in Production
+
+Use **uvicorn** to run the FastAPI app:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
 ```
 
-## 3. Backend Setup (FastAPI)
+Or run the module directly (same effect as above):
 
-The backend uses FastAPI and Uvicorn.
-
-1.  **Navigate to the project root**.
-
-2.  **Create a Virtual Environment**:
-    ```bash
-    python -m venv venv
-    # Activate:
-    source venv/bin/activate      # Linux/MacOS
-    # .\venv\Scripts\activate     # Windows
-    ```
-
-3.  **Install Dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-4.  **Run in Production Mode**:
-    Use `uvicorn` with multiple workers to handle concurrent requests efficiently.
-    ```bash
-    # Replace 'main:app' with your actual entry point (e.g., 'app.main:app')
-    uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --proxy-headers
-    ```
-
-    *Note: For robust process management on Linux, consider using `systemd` or `supervisor` to keep the application running in the background.*
-
-## 4. Frontend Setup (React + Vite)
-
-The frontend is a React application located in the `frontend/` directory.
-
-1.  **Navigate to the frontend directory**:
-    ```bash
-    cd frontend
-    ```
-
-2.  **Install Dependencies**:
-    ```bash
-    npm install
-    ```
-
-3.  **Build for Production**:
-    This compiles the React app into static files (HTML, CSS, JS) optimized for performance.
-    ```bash
-    npm run build
-    ```
-    *Output will typically be in `frontend/dist`.*
-
-## 5. Serving the Application (Nginx Example)
-
-It is recommended to use a reverse proxy like **Nginx** to serve the static frontend files and proxy API requests to the backend.
-
-**Example Nginx Configuration Snippet:**
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    # Serve Frontend Static Files
-    location / {
-        root /path/to/Miet-Classroom-Insights/frontend/dist;
-        index index.html;
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Proxy API Requests to FastAPI
-    location /api {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
+```bash
+python main.py
 ```
+
+- `host="0.0.0.0"` allows binding to all interfaces (needed for containers/remote access). Override port with `PORT` if required.
+
+### 3.6 MongoDB Logging in Production
+
+- MongoDB driver logs (pymongo, motor, urllib3) are set to **WARNING** level in the application. INFO-level MongoDB/driver logs are **suppressed** so production logs stay clean.
+
+### 3.7 No Secrets in Repository
+
+- Do **not** commit `.env`, `service-account.json`, or any file containing `MONGODB_URI` or API keys. Use environment variables or a secrets manager in production.
+
+---
+
+## 4. Frontend Stack
+
+- **Build**: React with **Vite**
+- **Output**: Static assets in **`dist/`**; only this folder is deployed to a web server or CDN.
+
+### 4.1 Environment: `.env.production`
+
+- Use **`.env.production`** for production builds. This file is used by Vite when running `npm run build`.
+- **Do not** commit secrets; only non-secret configuration (e.g. public API base URL) should be in version control if desired.
+
+### 4.2 API Base URL: `VITE_API_BASE_URL`
+
+- The frontend uses **only** **`VITE_API_BASE_URL`** for the backend (see `frontend/src/config/api.js`). All API requests use this base URL.
+- Set `VITE_API_BASE_URL` in `.env.production` to the production backend URL (e.g. `https://api.yourdomain.com` or `https://api.yourdomain.com/api` depending on your routing).
+
+### 4.3 Build Steps
+
+1. Install dependencies: `npm install`
+2. Configure production env: ensure `VITE_API_BASE_URL` is set in `.env.production`
+3. Build: **`npm run build`**
+4. Deploy the **`dist/`** directory to your web server or CDN (e.g. Nginx, Apache, or static hosting). Do **not** deploy source or `node_modules`.
+
+---
+
+## 5. Production Behavior Guarantees
+
+- **New users see existing data**: On first load, the UI reads from the backend, which reads from MongoDB. Any data already in the DB (from previous syncs) is shown immediately; no sync is required to see current DB state.
+- **Sync is incremental**: Sync endpoints upsert by ID; they do not clear collections. New and updated records are added/updated; existing data remains unless overwritten by newer data for the same ID.
+- **UI does not go blank during sync**: Sync runs on the server when triggered (e.g. “Sync Now”). The UI stays visible and can continue to show previously loaded (cached) data.
+- **Cached data remains visible**: The backend uses in-memory read-through cache with TTL. Until cache expires or is invalidated after sync, users see cached responses; after sync, cache is invalidated so the next request gets fresh data.
+- **Data refreshes after sync**: Once sync completes, cache invalidation ensures that subsequent page loads or refreshes return up-to-date data from the DB.
+
+---
+
+## 6. Deployment Checklist (Production Engineers)
+
+### 6.1 Environment Variables
+
+- [ ] `MONGODB_URI` – MongoDB Atlas URI (no localhost)
+- [ ] `GOOGLE_APPLICATION_CREDENTIALS` – Path to service account JSON
+- [ ] `GOOGLE_IMPERSONATED_USER` – Impersonated user email
+- [ ] `PORT` – Backend port (optional; default 8000)
+- [ ] `FRONTEND_ORIGIN` – Production frontend origin for CORS
+- [ ] (Optional) `ENV=production`
+
+### 6.2 Backend Build / Start
+
+- [ ] Python dependencies installed (e.g. from `requirements.txt` if present)
+- [ ] No secrets in repo; credentials provided via env or secrets manager
+- [ ] Start command: `uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}` (or `python main.py`)
+
+### 6.3 Frontend Build / Deploy
+
+- [ ] `VITE_API_BASE_URL` set in `.env.production`
+- [ ] Run: `npm install` then `npm run build`
+- [ ] Deploy only **`dist/`** to web server or CDN
+
+### 6.4 Verification
+
+- [ ] Backend health/readiness: e.g. `GET /stats` or equivalent returns 200
+- [ ] Frontend loads and can call backend (no CORS errors)
+- [ ] Sync: `POST /api/sync/all` (with valid Google credentials) returns success and DB documents increase or update as expected
+- [ ] MongoDB Atlas connection confirmed (no local MongoDB)
+
+---
+
+*This document is for production handoff only. It does not replace code or change application behavior.*
