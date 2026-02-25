@@ -5,7 +5,7 @@ const Header = () => {
     return (
         <header className="app-header">
             <div className="header-logo-container">
-                <Link to="/dashboard" style={{ display: 'flex', alignItems: 'center' }}>
+                <Link to="/" style={{ display: 'flex', alignItems: 'center' }}>
                     <div className="header-logo-icon">
                         <img
                             src="https://mietjmu.in/wp-content/uploads/2020/11/miet-logo-white.png"
