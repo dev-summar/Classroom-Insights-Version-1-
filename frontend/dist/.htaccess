@@ -1,5 +1,6 @@
-# SPA fallback: serve index.html for routes under /site/classroom/
-# Place this file in your document root for /site/classroom/ (e.g. htdocs/site/classroom/.htaccess)
+# Frontend only: SPA fallback for /site/classroom/*
+# Place this in the folder served at /site/classroom/ (e.g. htdocs/site/classroom/.htaccess)
+# Backend /classrooms/* is handled by the API server, not this file.
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /site/classroom/
