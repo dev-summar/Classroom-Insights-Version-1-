@@ -1,10 +1,9 @@
 import React from 'react';
-import { PieChart, BarChart3, Activity } from 'lucide-react';
+import { BarChart3, Activity } from 'lucide-react';
 
 export const AnalyticsDashboard = ({ stats, extraStats }) => {
     if (!stats || !extraStats) return null;
 
-    // --- Data Preparation ---
     const totalStudents = stats.students || 0;
     const silent = extraStats.silent || 0;
     const atRisk = extraStats.atRisk || 0;
@@ -13,7 +12,7 @@ export const AnalyticsDashboard = ({ stats, extraStats }) => {
     const workload = [
         { label: 'Courses', value: stats.courses || 0, color: '#1e40af' },
         { label: 'Assignments', value: stats.assignments || 0, color: '#ef4444' },
-        { label: 'Submissions', value: stats.submissions || 0, color: '#8b5cf6' }
+        { label: 'Submissions', value: stats.submissions || 0, color: '#8b5cf6' },
     ];
 
     const submissionsPerStudent = totalStudents ? (stats.submissions / totalStudents).toFixed(1) : 0;
@@ -21,25 +20,22 @@ export const AnalyticsDashboard = ({ stats, extraStats }) => {
 
     return (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '20px', width: '100%' }}>
-            {/* 1. Student Status Distribution (Donut) */}
             <ChartCard title="Student Status">
                 <DonutChart
                     data={[
                         { label: 'Active', value: active, color: '#10b981' },
                         { label: 'At-Risk', value: atRisk, color: '#c2410c' },
-                        { label: 'Silent', value: silent, color: '#be123c' }
+                        { label: 'Silent', value: silent, color: '#be123c' },
                     ]}
                     total={totalStudents}
                     centerLabel="Students"
                 />
             </ChartCard>
 
-            {/* 2. Academic Workload (Bar) */}
             <ChartCard title="Academic Workload">
                 <SimpleBarChart data={workload} />
             </ChartCard>
 
-            {/* 3. Engagement Ratio (Metrics) */}
             <ChartCard title="Engagement Ratios">
                 <EngagementMetrics
                     subPerStudent={submissionsPerStudent}
@@ -50,8 +46,6 @@ export const AnalyticsDashboard = ({ stats, extraStats }) => {
     );
 };
 
-// --- Sub-components ---
-
 const ChartCard = ({ title, children }) => (
     <div style={{
         background: '#fff',
@@ -60,7 +54,7 @@ const ChartCard = ({ title, children }) => (
         border: '1px solid #e2e8f0',
         display: 'flex',
         flexDirection: 'column',
-        gap: '12px'
+        gap: '12px',
     }}>
         <h3 style={{ fontSize: '0.9rem', fontWeight: 600, color: '#64748b', margin: 0 }}>{title}</h3>
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -70,7 +64,6 @@ const ChartCard = ({ title, children }) => (
 );
 
 const DonutChart = ({ data, total, centerLabel }) => {
-    // Calculate conic gradient segments
     let cumulative = 0;
     const gradients = data.map(item => {
         const start = (cumulative / total) * 100;
@@ -78,7 +71,6 @@ const DonutChart = ({ data, total, centerLabel }) => {
         const end = (cumulative / total) * 100;
         return `${item.color} ${start}% ${end}%`;
     });
-
     const background = `conic-gradient(${gradients.join(', ')})`;
 
     return (
@@ -89,9 +81,8 @@ const DonutChart = ({ data, total, centerLabel }) => {
                 height: '100px',
                 borderRadius: '50%',
                 background: total > 0 ? background : '#e2e8f0',
-                flexShrink: 0
+                flexShrink: 0,
             }}>
-                {/* Inner White Circle for Donut Effect */}
                 <div style={{
                     position: 'absolute',
                     top: '20%',
@@ -103,12 +94,11 @@ const DonutChart = ({ data, total, centerLabel }) => {
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    flexDirection: 'column'
+                    flexDirection: 'column',
                 }}>
                     <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#1e293b' }}>{total}</span>
                 </div>
             </div>
-            {/* Legend */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.8rem' }}>
                 {data.map((item, idx) => (
                     <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -138,7 +128,7 @@ const SimpleBarChart = ({ data }) => {
                                 height: `${height}%`,
                                 background: item.color,
                                 borderRadius: '4px 4px 0 0',
-                                transition: 'height 0.5s ease'
+                                transition: 'height 0.5s ease',
                             }}
                         />
                         <span style={{ fontSize: '0.7rem', color: '#64748b', textAlign: 'center' }}>{item.label}</span>
