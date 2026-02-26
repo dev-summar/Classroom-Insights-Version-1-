@@ -130,8 +130,8 @@ npm run dev
 -   `GET /api/assignments/{id}`: Assignment details + submissions.
 
 ### Analytics
--   `GET /analytics/silent-students`: List students with no activity/submissions.
--   `GET /analytics/at-risk-students`: List students with high missing assignment rates.
+-   `GET /silent-students`: List students with no activity/submissions.
+-   `GET /at-risk-students`: List students with high missing assignment rates.
 
 ### Debug / Status
 -   `GET /debug/db-source`: View database connection status and collection counts.
