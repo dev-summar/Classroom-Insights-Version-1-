@@ -141,12 +141,29 @@ python main.py
 ### 6.3 Frontend Build / Deploy
 
 - [ ] `VITE_API_BASE_URL` set in `.env.production`
+- [ ] `VITE_BASE_PATH=/site/classroom/` set in `.env.production` (so assets and routes use `/site/classroom/`)
 - [ ] Run: `npm install` then `npm run build`
 - [ ] Deploy only **`dist/`** to web server or CDN
 
-### 6.4 Verification
+### 6.4 SPA routing (back / forward / refresh)
 
-- [ ] Backend health/readiness: e.g. `GET /stats` or equivalent returns 200
+For **browser back/forward** and **direct URLs** (e.g. `https://pi360.net/site/classroom/silent-students`) and **refresh** to work, the server must serve the SPA’s `index.html` for all paths under `/site/classroom/` (except real files like `/site/classroom/assets/*`).
+
+- **Apache** (e.g. in a `.htaccess` or vhost for the app root):
+  ```apache
+  RewriteEngine On
+  RewriteBase /site/classroom/
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /site/classroom/index.html [L]
+  ```
+- **Nginx**: use a `try_files` fallback so that non-file requests under `/site/classroom/` return `/site/classroom/index.html`.
+
+If this is configured, back, forward, and refresh will work normally in production.
+
+### 6.5 Verification
+
+- [ ] Backend health/readiness: `GET /api/stats` (or `/classrooms/api/stats` if behind proxy) returns 200
 - [ ] Frontend loads and can call backend (no CORS errors)
 - [ ] Sync: `POST /api/sync/all` (with valid Google credentials) returns success and DB documents increase or update as expected
 - [ ] MongoDB Atlas connection confirmed (no local MongoDB)

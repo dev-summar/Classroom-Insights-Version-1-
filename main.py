@@ -1019,7 +1019,7 @@ async def calculate_student_analytics():
     _cache_set(cache_key, results, 90)
     return results
 
-@app.get("/analytics/silent-students")
+@app.get("/api/analytics/silent-students")
 async def get_silent_students(page: int = 1, limit: int = 10, search: str = ""):
     all_data = await calculate_student_analytics()
     # Filter for silent
@@ -1043,7 +1043,7 @@ async def get_silent_students(page: int = 1, limit: int = 10, search: str = ""):
         "limit": limit
     }
 
-@app.get("/analytics/at-risk-students")
+@app.get("/api/analytics/at-risk-students")
 async def get_at_risk_students(page: int = 1, limit: int = 10, search: str = ""):
     all_data = await calculate_student_analytics()
     # Filter for at-risk

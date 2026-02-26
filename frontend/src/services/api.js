@@ -21,18 +21,18 @@ export const courseService = {
 
 export const teacherService = {
     getAll: (page = 1, search = '', limit = 10) =>
-        api.get('/api/teachers', { params: { page, limit, search } }),
+        api.get('/teachers', { params: { page, limit, search } }),
 };
 
 export const studentService = {
     getAll: (page = 1, search = '', limit = 10) =>
-        api.get('/api/students', { params: { page, limit, search } }),
+        api.get('/students', { params: { page, limit, search } }),
 };
 
 export const assignmentService = {
     getAll: (page = 1, search = '', limit = 10) =>
-        api.get('/api/assignments', { params: { page, limit, search } }),
-    getById: (id, page = 1) => api.get(`/api/assignments/${id}`, { params: { page } }),
+        api.get('/assignments', { params: { page, limit, search } }),
+    getById: (id, page = 1) => api.get(`/assignments/${id}`, { params: { page } }),
 };
 
 export default api;
